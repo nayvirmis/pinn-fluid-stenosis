@@ -1,0 +1,986 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+
+\title{Mathematical Formulation for PINN-Based Cardiovascular Hemodynamics and Stenosis Detection}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Project Roadmap}
+
+The project is organized in the following order:
+\begin{enumerate}
+    \item a baseline steady-flow PINN solver for a healthy straight channel,
+    \item synthetic stenosed-vessel and stenosed-tree forward models,
+    \item inverse recovery of stenosis location and severity, with the inverse PINN as the main detection method,
+    \item richer two-dimensional stenosed-channel PINNs with known and unknown stenosis geometry.
+\end{enumerate}
+
+The reduced-order models are retained because they are fast, interpretable, and useful for creating synthetic data and sanity checks. The main stenosis-detection endpoint is not reduced-order linear algebra. It is a physics-informed inverse problem where the neural flow field and stenosis parameters are optimized together.
+
+\section{Common Physical Assumptions and Notation}
+
+\subsection{Fluid Model}
+
+Blood is modeled as an incompressible Newtonian fluid in the current implementation. The density is $\rho$, the dynamic viscosity is $\mu$, and the kinematic viscosity is
+\begin{equation}
+    \nu = \frac{\mu}{\rho}.
+\end{equation}
+
+For the two-dimensional PINN stages, the unknown velocity-pressure field is
+\begin{equation}
+    \bm{q}(x,y)
+    =
+    \begin{bmatrix}
+        u(x,y)\\
+        v(x,y)\\
+        p(x,y)
+    \end{bmatrix},
+\end{equation}
+where $u$ is axial velocity, $v$ is transverse velocity, and $p$ is pressure.
+
+The neural approximation is
+\begin{equation}
+    \mathcal{N}_{\theta}(x,y)
+    =
+    \begin{bmatrix}
+        u_{\theta}(x,y)\\
+        v_{\theta}(x,y)\\
+        p_{\theta}(x,y)
+    \end{bmatrix}.
+\end{equation}
+
+\subsection{Steady Navier--Stokes Residuals}
+
+The steady incompressible Navier--Stokes equations are
+\begin{align}
+    \nabla\cdot \bm{u} &= 0,\\
+    (\bm{u}\cdot\nabla)\bm{u}
+    + \frac{1}{\rho}\nabla p
+    - \nu \nabla^2 \bm{u}
+    &= \bm{0}.
+\end{align}
+
+In two dimensions, the residuals evaluated on the neural field are
+\begin{align}
+    r_c
+    &=
+    \frac{\partial u_{\theta}}{\partial x}
+    +
+    \frac{\partial v_{\theta}}{\partial y},
+    \label{eq:common_continuity}\\
+    r_x
+    &=
+    u_{\theta}\frac{\partial u_{\theta}}{\partial x}
+    +
+    v_{\theta}\frac{\partial u_{\theta}}{\partial y}
+    +
+    \frac{1}{\rho}\frac{\partial p_{\theta}}{\partial x}
+    -
+    \nu
+    \left(
+        \frac{\partial^2 u_{\theta}}{\partial x^2}
+        +
+        \frac{\partial^2 u_{\theta}}{\partial y^2}
+    \right),
+    \label{eq:common_momentum_x}\\
+    r_y
+    &=
+    u_{\theta}\frac{\partial v_{\theta}}{\partial x}
+    +
+    v_{\theta}\frac{\partial v_{\theta}}{\partial y}
+    +
+    \frac{1}{\rho}\frac{\partial p_{\theta}}{\partial y}
+    -
+    \nu
+    \left(
+        \frac{\partial^2 v_{\theta}}{\partial x^2}
+        +
+        \frac{\partial^2 v_{\theta}}{\partial y^2}
+    \right).
+    \label{eq:common_momentum_y}
+\end{align}
+
+All derivatives in the PINN losses are computed by automatic differentiation.
+
+\subsection{Initial Conditions}
+
+All implemented flow solvers are steady, so there is no physical time initial condition. Neural-network training starts from optimization initial values:
+\begin{equation}
+    \theta = \theta_0.
+\end{equation}
+For inverse PINNs, the stenosis parameters are also initialized:
+\begin{equation}
+    s=s_0,
+    \qquad
+    c=c_0.
+\end{equation}
+These are optimization initial guesses, not time-dependent physical initial conditions.
+
+If the project later moves to pulsatile flow, the unsteady formulation would add time $t$ and require
+\begin{equation}
+    \bm{u}(\bm{x},0)=\bm{u}_0(\bm{x}),
+    \qquad
+    p(\bm{x},0)=p_0(\bm{x}),
+\end{equation}
+or another clinically justified initialization.
+
+\section{Stage 1: Baseline Healthy-Channel PINN}
+
+\subsection{Domain}
+
+The baseline channel is
+\begin{equation}
+    \Omega_0
+    =
+    \{(x,y)\mid 0\le x\le L,\; -h\le y\le h\},
+    \qquad
+    h=\frac{H}{2}.
+\end{equation}
+
+\subsection{Boundary Conditions}
+
+The inlet boundary is
+\begin{equation}
+    \Gamma_{\mathrm{in}}
+    =
+    \{(0,y)\mid -h\le y\le h\}.
+\end{equation}
+The prescribed Poiseuille inlet velocity is
+\begin{align}
+    u(0,y)
+    &=
+    U_{\max}
+    \left(
+        1-\frac{y^2}{h^2}
+    \right),\\
+    v(0,y) &= 0.
+\end{align}
+
+The wall boundary is
+\begin{equation}
+    \Gamma_{\mathrm{wall}}
+    =
+    \{(x,\pm h)\mid 0\le x\le L\}.
+\end{equation}
+The wall condition is no slip and no penetration:
+\begin{align}
+    u(x,\pm h)&=0,\\
+    v(x,\pm h)&=0.
+\end{align}
+
+The outlet boundary is
+\begin{equation}
+    \Gamma_{\mathrm{out}}
+    =
+    \{(L,y)\mid -h\le y\le h\}.
+\end{equation}
+The baseline anchors transverse velocity and outlet pressure:
+\begin{align}
+    v(L,y)&=0,\\
+    p(L,y)&=P_{\mathrm{out}}.
+\end{align}
+
+\subsection{Analytical Reference}
+
+For validation, the exact Poiseuille solution is
+\begin{align}
+    u_{\mathrm{exact}}(y)
+    &=
+    U_{\max}
+    \left(
+        1-\frac{y^2}{h^2}
+    \right),\\
+    v_{\mathrm{exact}}(x,y)
+    &=0,\\
+    p_{\mathrm{exact}}(x)
+    &=
+    P_{\mathrm{in}}
+    +
+    \frac{dP}{dx}x,
+\end{align}
+where
+\begin{equation}
+    \frac{dP}{dx}
+    =
+    -\frac{2\rho\nu U_{\max}}{h^2}.
+\end{equation}
+
+\subsection{PINN Loss}
+
+Let $\mathcal{C}$ be interior collocation points, $\mathcal{W}$ wall points, $\mathcal{I}$ inlet points, and $\mathcal{O}$ outlet points. The PDE residual loss is
+\begin{equation}
+    \mathcal{L}_{\mathrm{PDE}}
+    =
+    \frac{1}{|\mathcal{C}|}
+    \sum_{(x_i,y_i)\in\mathcal{C}}
+    \left[
+        r_c(x_i,y_i)^2
+        +
+        r_x(x_i,y_i)^2
+        +
+        r_y(x_i,y_i)^2
+    \right].
+\end{equation}
+
+The boundary losses are
+\begin{align}
+    \mathcal{L}_{\mathrm{wall}}
+    &=
+    \frac{1}{|\mathcal{W}|}
+    \sum_{(x_i,y_i)\in\mathcal{W}}
+    \left[
+        u_{\theta}(x_i,y_i)^2
+        +
+        v_{\theta}(x_i,y_i)^2
+    \right],\\
+    \mathcal{L}_{\mathrm{in}}
+    &=
+    \frac{1}{|\mathcal{I}|}
+    \sum_{(0,y_i)\in\mathcal{I}}
+    \left[
+        \left(
+            u_{\theta}(0,y_i)
+            -
+            U_{\max}
+            \left(
+                1-\frac{y_i^2}{h^2}
+            \right)
+        \right)^2
+        +
+        v_{\theta}(0,y_i)^2
+    \right],\\
+    \mathcal{L}_{\mathrm{out}}
+    &=
+    \frac{1}{|\mathcal{O}|}
+    \sum_{(L,y_i)\in\mathcal{O}}
+    \left[
+        v_{\theta}(L,y_i)^2
+        +
+        \left(
+            p_{\theta}(L,y_i)-P_{\mathrm{out}}
+        \right)^2
+    \right].
+\end{align}
+
+The baseline optimization problem is
+\begin{equation}
+    \theta^{\ast}
+    =
+    \arg\min_{\theta}
+    \mathcal{L}_{\mathrm{base}}(\theta),
+\end{equation}
+with
+\begin{equation}
+    \mathcal{L}_{\mathrm{base}}
+    =
+    \mathcal{L}_{\mathrm{PDE}}
+    +
+    10\mathcal{L}_{\mathrm{wall}}
+    +
+    10\mathcal{L}_{\mathrm{in}}
+    +
+    10\mathcal{L}_{\mathrm{out}}.
+\end{equation}
+
+\section{Stage 2: Synthetic Stenosed Forward Models}
+
+Synthetic forward models provide controlled ground truth for stenosis severity, location, velocity, pressure drop, Reynolds number, and wall shear stress.
+
+\subsection{Single-Vessel Geometry}
+
+The one-dimensional vessel coordinate is
+\begin{equation}
+    x\in[0,L].
+\end{equation}
+
+The healthy radius is $R_0$. A Gaussian stenosis is
+\begin{equation}
+    R(x;s,c,w)
+    =
+    R_0
+    \left[
+        1
+        -
+        s
+        \exp
+        \left(
+            -\frac{1}{2}
+            \left(
+                \frac{x-c}{w}
+            \right)^2
+        \right)
+    \right],
+    \label{eq:single_radius}
+\end{equation}
+where $s\in[0,1)$ is stenosis severity, $c$ is the stenosis center, and $w$ is the stenosis width.
+
+The cross-sectional area is
+\begin{equation}
+    A(x;s,c)
+    =
+    \pi R(x;s,c,w)^2.
+\end{equation}
+
+\subsection{Single-Vessel Hemodynamics}
+
+For prescribed volumetric flow rate $Q$, mass conservation gives
+\begin{equation}
+    Q = A(x)U(x),
+\end{equation}
+so the cross-section-averaged velocity is
+\begin{equation}
+    U(x;s,c)
+    =
+    \frac{Q}{A(x;s,c)}
+    =
+    \frac{Q}{\pi R(x;s,c,w)^2}.
+\end{equation}
+
+The local Hagen--Poiseuille pressure-gradient magnitude is
+\begin{equation}
+    g(x;s,c)
+    =
+    \frac{8\mu Q}{\pi R(x;s,c,w)^4}.
+\end{equation}
+
+The accumulated pressure drop is
+\begin{equation}
+    \Delta P(x;s,c)
+    =
+    \int_{0}^{x}
+    g(\xi;s,c)\,d\xi.
+\end{equation}
+
+The pressure is propagated from the inlet:
+\begin{equation}
+    P(x;s,c)
+    =
+    P_{\mathrm{in}}
+    -
+    \Delta P(x;s,c).
+\end{equation}
+
+Derived quantities are
+\begin{align}
+    D(x;s,c) &= 2R(x;s,c,w),\\
+    Re(x;s,c) &=
+    \frac{\rho U(x;s,c)D(x;s,c)}{\mu},\\
+    \tau_w(x;s,c) &=
+    \frac{4\mu Q}{\pi R(x;s,c,w)^3},\\
+    \mathcal{R}(s,c) &=
+    \frac{\Delta P(L;s,c)}{Q}.
+\end{align}
+
+\subsection{Single-Vessel Boundary Conditions}
+
+The reduced-order forward problem is steady and uses
+\begin{align}
+    P(0) &= P_{\mathrm{in}},\\
+    Q(x) &= Q,\qquad 0\le x\le L.
+\end{align}
+The outlet pressure is computed:
+\begin{equation}
+    P(L)
+    =
+    P_{\mathrm{in}}
+    -
+    \Delta P(L).
+\end{equation}
+
+\subsection{Y-Bifurcation Tree Topology}
+
+The tree phase uses a fixed Y topology:
+\begin{equation}
+    \mathcal{B}
+    =
+    \{b_0,b_L,b_R\},
+\end{equation}
+where $b_0$ is the inlet branch, $b_L$ is the left outlet branch, and $b_R$ is the right outlet branch.
+
+Each branch has local coordinate
+\begin{equation}
+    x_b\in[0,L_b],
+\end{equation}
+healthy radius $R_{0,b}$, branch flow rate $Q_b$, and optional stenosis severity $s_b$.
+
+\subsection{Flow Split}
+
+The inlet flow is prescribed:
+\begin{equation}
+    Q_0 = Q_{\mathrm{in}}.
+\end{equation}
+
+The outlet flows are assigned by Murray-style radius weighting:
+\begin{align}
+    Q_L
+    &=
+    Q_{\mathrm{in}}
+    \frac{R_{0,L}^{3}}
+    {R_{0,L}^{3}+R_{0,R}^{3}},
+    \\
+    Q_R
+    &=
+    Q_{\mathrm{in}}
+    \frac{R_{0,R}^{3}}
+    {R_{0,L}^{3}+R_{0,R}^{3}}.
+\end{align}
+Thus
+\begin{equation}
+    Q_0 = Q_L + Q_R.
+\end{equation}
+
+\subsection{Branch Geometry and Hemodynamics}
+
+The inlet branch is healthy:
+\begin{equation}
+    R_{b_0}(x_{b_0})=R_{0,b_0}.
+\end{equation}
+
+For an outlet branch $b\in\{b_L,b_R\}$,
+\begin{equation}
+    R_b(x_b;s_b)
+    =
+    R_{0,b}
+    \left[
+        1
+        -
+        s_b
+        \exp
+        \left(
+            -\frac{1}{2}
+            \left(
+                \frac{x_b-c_b}{w}
+            \right)^2
+        \right)
+    \right].
+\end{equation}
+Healthy branches use $s_b=0$.
+
+For each branch,
+\begin{align}
+    A_b(x_b) &= \pi R_b(x_b)^2,\\
+    U_b(x_b) &= \frac{Q_b}{A_b(x_b)},\\
+    g_b(x_b) &= \frac{8\mu Q_b}{\pi R_b(x_b)^4},\\
+    \Delta P_b(x_b) &= \int_{0}^{x_b}g_b(\xi)\,d\xi,\\
+    P_b(x_b) &= P_b(0)-\Delta P_b(x_b),\\
+    Re_b(x_b) &= \frac{2\rho U_b(x_b)R_b(x_b)}{\mu},\\
+    \tau_{w,b}(x_b) &= \frac{4\mu Q_b}{\pi R_b(x_b)^3},\\
+    \mathcal{R}_b &= \frac{\Delta P_b(L_b)}{Q_b}.
+\end{align}
+
+\subsection{Tree Boundary and Interface Conditions}
+
+At the inlet,
+\begin{align}
+    P_{b_0}(0) &= P_{\mathrm{in}},\\
+    Q_{b_0} &= Q_{\mathrm{in}}.
+\end{align}
+
+At the bifurcation, mass conservation and pressure continuity are
+\begin{align}
+    Q_{b_0} &= Q_{b_L}+Q_{b_R},\\
+    P_{b_L}(0)
+    =
+    P_{b_R}(0)
+    =
+    P_{b_0}(L_{b_0})
+    &=
+    P_{\mathrm{bif}}.
+\end{align}
+
+Outlet pressures are computed by branch pressure drops:
+\begin{align}
+    P_{b_L}(L_{b_L})
+    &=
+    P_{\mathrm{bif}}
+    -
+    \Delta P_{b_L}(L_{b_L}),
+    \\
+    P_{b_R}(L_{b_R})
+    &=
+    P_{\mathrm{bif}}
+    -
+    \Delta P_{b_R}(L_{b_R}).
+\end{align}
+
+\section{Stage 3: Inverse Recovery of Stenosis}
+
+\subsection{Reduced-Order Single-Vessel Inverse Baseline}
+
+The reduced-order inverse baseline estimates
+\begin{equation}
+    \lambda=(s,c).
+\end{equation}
+
+Unconstrained raw variables are mapped into physical bounds:
+\begin{align}
+    s(\alpha_s)
+    &=
+    s_{\min}
+    +
+    (s_{\max}-s_{\min})\sigma(\alpha_s),\\
+    c(\alpha_c)
+    &=
+    c_{\min}
+    +
+    (c_{\max}-c_{\min})\sigma(\alpha_c),
+\end{align}
+where
+\begin{equation}
+    \sigma(z)=\frac{1}{1+e^{-z}}.
+\end{equation}
+
+Sparse measurements are sampled at
+\begin{equation}
+    \mathcal{S}=\{x_j\}_{j=1}^{N_s}.
+\end{equation}
+The observations are
+\begin{align}
+    U_j^{\mathrm{obs}}
+    &=
+    U(x_j;s_{\mathrm{true}},c_{\mathrm{true}})
+    +
+    \epsilon_j^U,\\
+    \Delta P_j^{\mathrm{obs}}
+    &=
+    \Delta P(x_j;s_{\mathrm{true}},c_{\mathrm{true}})
+    +
+    \epsilon_j^P.
+\end{align}
+
+For candidate $(s,c)$,
+\begin{align}
+    U_j(s,c)
+    &=
+    \frac{Q}{\pi R(x_j;s,c,w)^2},\\
+    \Delta P_j(s,c)
+    &=
+    \int_{0}^{x_j}
+    \frac{8\mu Q}{\pi R(\xi;s,c,w)^4}\,d\xi.
+\end{align}
+
+The inverse loss is
+\begin{equation}
+    \mathcal{L}_{\mathrm{RO,1D}}(s,c)
+    =
+    \frac{1}{N_s}
+    \sum_{j=1}^{N_s}
+    \left[
+        \left(
+            \frac{U_j(s,c)-U_j^{\mathrm{obs}}}
+            {U_{\mathrm{scale}}}
+        \right)^2
+        +
+        \left(
+            \frac{\Delta P_j(s,c)-\Delta P_j^{\mathrm{obs}}}
+            {P_{\mathrm{scale}}}
+        \right)^2
+    \right].
+\end{equation}
+
+The reduced-order estimate is
+\begin{equation}
+    (s^{\ast},c^{\ast})
+    =
+    \arg\min_{s,c}
+    \mathcal{L}_{\mathrm{RO,1D}}(s,c).
+\end{equation}
+
+\subsection{Reduced-Order Tree Inverse Baseline}
+
+For the Y tree, the inverse baseline estimates outlet severities
+\begin{equation}
+    \lambda_{\mathrm{tree}}=(s_L,s_R).
+\end{equation}
+
+The branch centers are fixed in the current implementation:
+\begin{equation}
+    c_L=\frac{1}{2}L_{b_L},
+    \qquad
+    c_R=\frac{1}{2}L_{b_R}.
+\end{equation}
+
+For each outlet branch $b\in\{L,R\}$, sparse observations are
+\begin{equation}
+    \mathcal{S}_b=\{x_{b,j}\}_{j=1}^{N_b},
+\end{equation}
+with
+\begin{align}
+    U_{b,j}^{\mathrm{obs}}
+    &=
+    U_b(x_{b,j};s_b^{\mathrm{true}})
+    +
+    \epsilon_{b,j}^{U},\\
+    \Delta P_{b,j}^{\mathrm{obs}}
+    &=
+    \Delta P_b(x_{b,j};s_b^{\mathrm{true}})
+    +
+    \epsilon_{b,j}^{P}.
+\end{align}
+
+The branch loss is
+\begin{equation}
+    \mathcal{L}_b(s_b)
+    =
+    \frac{1}{N_b}
+    \sum_{j=1}^{N_b}
+    \left[
+        \left(
+            \frac{U_b(x_{b,j};s_b)-U_{b,j}^{\mathrm{obs}}}
+            {U_{b,\mathrm{scale}}}
+        \right)^2
+        +
+        \left(
+            \frac{\Delta P_b(x_{b,j};s_b)-\Delta P_{b,j}^{\mathrm{obs}}}
+            {P_{b,\mathrm{scale}}}
+        \right)^2
+    \right].
+\end{equation}
+
+The tree inverse loss is
+\begin{equation}
+    \mathcal{L}_{\mathrm{RO,tree}}(s_L,s_R)
+    =
+    \mathcal{L}_L(s_L)+\mathcal{L}_R(s_R).
+\end{equation}
+
+The recovered outlet severities are
+\begin{equation}
+    (s_L^{\ast},s_R^{\ast})
+    =
+    \arg\min_{s_L,s_R}
+    \mathcal{L}_{\mathrm{RO,tree}}(s_L,s_R).
+\end{equation}
+
+The classified stenosed branch is
+\begin{equation}
+    b^{\ast}
+    =
+    \begin{cases}
+        b_L, & s_L^{\ast}\ge s_R^{\ast},\\
+        b_R, & s_R^{\ast}>s_L^{\ast},
+    \end{cases}
+\end{equation}
+and the recovered severity is
+\begin{equation}
+    s^{\ast}=\max(s_L^{\ast},s_R^{\ast}).
+\end{equation}
+
+\subsection{Main Method: Inverse PINN Stenosis Detection}
+
+The inverse PINN is the main stenosis-detection formulation. It estimates the flow field and the unknown blockage parameters in one physics-constrained optimization problem.
+
+\subsubsection{Unknown Stenosed Domain}
+
+The stenosed channel half-height is
+\begin{equation}
+    h(x;s,c)
+    =
+    h_0
+    \left[
+        1
+        -
+        s
+        \exp
+        \left(
+            -\frac{1}{2}
+            \left(
+                \frac{x-c}{w}
+            \right)^2
+        \right)
+    \right],
+    \qquad
+    h_0=\frac{H}{2}.
+    \label{eq:inverse_height}
+\end{equation}
+
+The domain depends on the unknown stenosis parameters:
+\begin{equation}
+    \Omega(s,c)
+    =
+    \{(x,y)\mid 0\le x\le L,\; -h(x;s,c)\le y\le h(x;s,c)\}.
+\end{equation}
+
+The trainable unknowns are
+\begin{equation}
+    \Lambda=(\theta,s,c).
+\end{equation}
+
+\subsubsection{PINN Residual}
+
+At each training step, collocation points are sampled inside $\Omega(s,c)$. The PDE residuals are the same Navier--Stokes residuals from Equations~\eqref{eq:common_continuity}--\eqref{eq:common_momentum_y}.
+
+The inverse-PINN PDE loss is
+\begin{equation}
+    \mathcal{L}_{\mathrm{PDE}}^{\mathrm{inv}}
+    =
+    \frac{1}{|\mathcal{C}(s,c)|}
+    \sum_{(x_i,y_i)\in\mathcal{C}(s,c)}
+    \left[
+        4r_c(x_i,y_i)^2
+        +
+        r_x(x_i,y_i)^2
+        +
+        r_y(x_i,y_i)^2
+    \right].
+\end{equation}
+
+\subsubsection{Inverse-PINN Boundary Conditions}
+
+The inferred wall is
+\begin{equation}
+    \Gamma_{\mathrm{wall}}(s,c)
+    =
+    \{(x,\pm h(x;s,c))\mid 0\le x\le L\}.
+\end{equation}
+No slip and no penetration give
+\begin{align}
+    u_{\theta}(x,\pm h(x;s,c))&=0,\\
+    v_{\theta}(x,\pm h(x;s,c))&=0.
+\end{align}
+
+At the inlet,
+\begin{align}
+    u_{\theta}(0,y)
+    &=
+    U_{\max}
+    \left(
+        1-\frac{y^2}{h_0^2}
+    \right),\\
+    v_{\theta}(0,y)&=0,\\
+    p_{\theta}(0,y)&=P_{\mathrm{in}}.
+\end{align}
+
+At the outlet,
+\begin{align}
+    v_{\theta}(L,y)&=0,\\
+    p_{\theta}(L,y)&=P_{\mathrm{out}}.
+\end{align}
+
+The boundary loss is
+\begin{equation}
+    \mathcal{L}_{\mathrm{BC}}^{\mathrm{inv}}
+    =
+    \mathcal{L}_{\mathrm{wall}}
+    +
+    \mathcal{L}_{\mathrm{in}}
+    +
+    \mathcal{L}_{\mathrm{out}}.
+\end{equation}
+
+\subsubsection{Sparse Flow, Pressure, and Wall Observations}
+
+Sparse flow-pressure observations are
+\begin{equation}
+    \mathcal{D}_f
+    =
+    \{
+    (x_j,y_j,u_j^{\mathrm{obs}},v_j^{\mathrm{obs}},p_j^{\mathrm{obs}})
+    \}_{j=1}^{N_f}.
+\end{equation}
+
+The data loss is
+\begin{equation}
+    \mathcal{L}_{\mathrm{data}}^{\mathrm{inv}}
+    =
+    \frac{1}{N_f}
+    \sum_{j=1}^{N_f}
+    \left[
+        \left(
+            \frac{u_{\theta}(x_j,y_j)-u_j^{\mathrm{obs}}}
+            {U_{\mathrm{scale}}}
+        \right)^2
+        +
+        \left(
+            \frac{v_{\theta}(x_j,y_j)-v_j^{\mathrm{obs}}}
+            {U_{\mathrm{scale}}}
+        \right)^2
+        +
+        \left(
+            \frac{p_{\theta}(x_j,y_j)-p_j^{\mathrm{obs}}}
+            {P_{\mathrm{scale}}}
+        \right)^2
+    \right].
+\end{equation}
+
+Sparse anatomical wall observations are
+\begin{equation}
+    \mathcal{D}_g
+    =
+    \{(x_k,h_k^{\mathrm{obs}})\}_{k=1}^{N_g}.
+\end{equation}
+These make the stenosis geometry identifiable, as would wall contours from imaging. The geometry loss is
+\begin{equation}
+    \mathcal{L}_{\mathrm{geom}}
+    =
+    \frac{1}{N_g}
+    \sum_{k=1}^{N_g}
+    \left(
+        \frac{h(x_k;s,c)-h_k^{\mathrm{obs}}}{h_0}
+    \right)^2.
+\end{equation}
+
+\subsubsection{Joint Inverse-PINN Objective}
+
+The implemented inverse-PINN loss is
+\begin{equation}
+    \mathcal{L}_{\mathrm{invPINN}}(\theta,s,c)
+    =
+    \mathcal{L}_{\mathrm{PDE}}^{\mathrm{inv}}
+    +
+    10\mathcal{L}_{\mathrm{BC}}^{\mathrm{inv}}
+    +
+    5\mathcal{L}_{\mathrm{data}}^{\mathrm{inv}}
+    +
+    200\mathcal{L}_{\mathrm{geom}}.
+\end{equation}
+
+The final recovered stenosis parameters are obtained from
+\begin{equation}
+    (\theta^{\ast},s^{\ast},c^{\ast})
+    =
+    \arg\min_{\theta,s,c}
+    \mathcal{L}_{\mathrm{invPINN}}(\theta,s,c).
+\end{equation}
+
+This is the central detection step: the stenosis parameters are recovered while the neural velocity-pressure field obeys the Navier--Stokes residual, boundary conditions, sparse sensor data, and sparse vessel-wall data.
+
+\section{Stage 4: Richer 2D Stenosed-Channel PINNs}
+
+\subsection{Forward 2D Stenosed-Channel PINN}
+
+The forward 2D stenosed-channel PINN uses the same geometry as Equation~\eqref{eq:inverse_height}, but the stenosis parameters are known:
+\begin{equation}
+    h_{\mathrm{known}}(x)
+    =
+    h(x;s_{\mathrm{given}},c_{\mathrm{given}}).
+\end{equation}
+The domain is
+\begin{equation}
+    \Omega_{\mathrm{sten}}
+    =
+    \{(x,y)\mid 0\le x\le L,\; -h_{\mathrm{known}}(x)\le y\le h_{\mathrm{known}}(x)\}.
+\end{equation}
+
+The network $\mathcal{N}_{\theta}(x,y)$ solves the same steady Navier--Stokes residuals. The wall, inlet, and outlet conditions are
+\begin{align}
+    u_{\theta}(x,\pm h_{\mathrm{known}}(x))&=0,\\
+    v_{\theta}(x,\pm h_{\mathrm{known}}(x))&=0,\\
+    u_{\theta}(0,y)
+    &=
+    U_{\max}
+    \left(
+        1-\frac{y^2}{h_0^2}
+    \right),\\
+    v_{\theta}(0,y)&=0,\\
+    p_{\theta}(0,y)&=P_{\mathrm{in}},\\
+    v_{\theta}(L,y)&=0,\\
+    p_{\theta}(L,y)&=P_{\mathrm{out}}.
+\end{align}
+
+To improve training in the curved stenosed region, collocation points are not sampled only uniformly. A fraction of points is concentrated near the stenosis center $c_{\mathrm{given}}$ and a fraction is concentrated near the walls:
+\begin{equation}
+    x_i
+    \sim
+    (1-\alpha_{\ell})\mathcal{U}(0,L)
+    +
+    \alpha_{\ell}
+    \mathcal{N}(c_{\mathrm{given}},w^2),
+\end{equation}
+with clipping to $[0,L]$. The transverse coordinate is sampled as
+\begin{equation}
+    y_i=\eta_i h_{\mathrm{known}}(x_i),
+    \qquad
+    \eta_i\in[-1,1],
+\end{equation}
+with additional samples biased toward $|\eta_i|\approx 1$ to better resolve wall behavior.
+
+The upgraded forward PINN also uses a weak synthetic-reference term. The reference is not the final solver; it is a training scaffold from the reduced-order stenosed model. For sampled points $\mathcal{D}_{\mathrm{ref}}$, define
+\begin{equation}
+    \begin{aligned}
+        \mathcal{L}_{\mathrm{ref}}
+        &=
+        \frac{1}{|\mathcal{D}_{\mathrm{ref}}|}
+        \sum_{(x_j,y_j)\in\mathcal{D}_{\mathrm{ref}}}
+        \bigg[
+            \left(
+                \frac{u_{\theta}(x_j,y_j)-U_{\mathrm{ref}}(x_j,y_j)}
+                {U_{\max}}
+            \right)^2 \\
+        &\qquad
+            +
+            \left(
+                \frac{v_{\theta}(x_j,y_j)}
+                {U_{\max}}
+            \right)^2
+            +
+            \left(
+                \frac{p_{\theta}(x_j,y_j)-P_{\mathrm{ref}}(x_j)}
+                {P_{\mathrm{in}}-P_{\mathrm{out}}}
+            \right)^2
+        \bigg].
+    \end{aligned}
+\end{equation}
+
+The forward stenosed PINN objective is
+\begin{equation}
+    \theta^{\ast}
+    =
+    \arg\min_{\theta}
+    \left[
+        6\mathcal{L}_{c}
+        +
+        4\mathcal{L}_{m}
+        +
+        10\mathcal{L}_{\mathrm{wall}}
+        +
+        10\mathcal{L}_{\mathrm{in}}
+        +
+        10\mathcal{L}_{\mathrm{out}}
+        +
+        0.5\mathcal{L}_{\mathrm{ref}}
+    \right].
+\end{equation}
+Here $\mathcal{L}_{c}$ is the continuity residual loss and $\mathcal{L}_{m}$ is the combined $x$- and $y$-momentum residual loss. This reweighting improves the harder curved-geometry residuals while keeping the solution physics-informed.
+
+\section{Complete Solution Order}
+
+The full project can be summarized as the following mathematical pipeline:
+\begin{enumerate}
+    \item Learn the healthy-channel PINN:
+    \begin{equation}
+        \theta_{\mathrm{base}}^{\ast}
+        =
+        \arg\min_{\theta}
+        \mathcal{L}_{\mathrm{base}}(\theta).
+    \end{equation}
+    \item Generate synthetic stenosed single-vessel and tree fields from $R(x;s,c,w)$ and branch laws:
+    \begin{equation}
+        \{R,A,U,P,\Delta P,Re,\tau_w,\mathcal{R}\}
+        =
+        \mathcal{F}_{\mathrm{RO}}(s,c,Q).
+    \end{equation}
+    \item Use reduced-order inverse models only as fast baselines:
+    \begin{equation}
+        \lambda_{\mathrm{RO}}^{\ast}
+        =
+        \arg\min_{\lambda}
+        \mathcal{L}_{\mathrm{RO}}(\lambda).
+    \end{equation}
+    \item Perform the main stenosis detection with the inverse PINN:
+    \begin{equation}
+        (\theta^{\ast},s^{\ast},c^{\ast})
+        =
+        \arg\min_{\theta,s,c}
+        \mathcal{L}_{\mathrm{invPINN}}(\theta,s,c).
+    \end{equation}
+    \item Verify the richer 2D stenosed-channel forward PINN with known geometry and the inverse 2D PINN with unknown stenosis parameters.
+\end{enumerate}
+
+\end{document}

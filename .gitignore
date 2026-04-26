@@ -1,0 +1,32 @@
+# macOS and editor cruft
+.DS_Store
+~$*
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Local matplotlib/font caches
+.cache/
+.mplconfig/
+
+# Generated outputs and experiment artifacts
+outputs/
+
+# LaTeX build intermediates
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# Local source/reference documents not needed for code submission
+*.docx
+1-s2.0-*.pdf
+fluids-09-00153.pdf
+
+# Keep the compiled formulation PDF as a project artifact.
+!MATHEMATICAL_FORMULATION.pdf
