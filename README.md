@@ -32,13 +32,6 @@ The full formulation is provided in:
 - `MATHEMATICAL_FORMULATION.tex`
 - `MATHEMATICAL_FORMULATION.pdf`
 
-## Presentation
-
-A complete project presentation is available in:
-
-- `presentation/PINN_Fluid_Stenosis_Presentation.pptx`
-- `presentation/PINN_Fluid_Stenosis_Presentation.md`
-
 ## Baseline problem
 
 We solve steady incompressible Navier-Stokes flow in a 2D channel:
